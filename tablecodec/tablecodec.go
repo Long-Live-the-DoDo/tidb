@@ -291,9 +291,10 @@ func EncodeRow(sc *stmtctx.StatementContext, row []types.Datum, colIDs []int64, 
 	if len(row) != len(colIDs) {
 		return nil, errors.Errorf("EncodeRow error: data and columnID count not match %d vs %d", len(row), len(colIDs))
 	}
-	if e.Enable {
-		return e.Encode(sc, colIDs, row, valBuf)
-	}
+	// For hackthon: disable the new encoding mode.
+	// if e.Enable {
+	// 	return e.Encode(sc, colIDs, row, valBuf)
+	// }
 	return EncodeOldRow(sc, row, colIDs, valBuf, values)
 }
 

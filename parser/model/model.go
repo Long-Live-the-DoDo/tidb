@@ -225,6 +225,14 @@ const ExtraHandleID = -1
 // ExtraPidColID is the column ID of column which store the partitionID decoded in global index values.
 const ExtraPidColID = -2
 
+// ExtraMVCCTsID is the column ID of column which store the mvcc transaction timestamp.
+// for use of execution phase
+const ExtraMVCCTsID = -3
+
+// ExtraMVCCOpID is the column ID of column which store the mvcc transaction operation.
+// for use of execution phase
+const ExtraMVCCOpID = -4
+
 const (
 	// TableInfoVersion0 means the table info version is 0.
 	// Upgrade from v2.1.1 or v2.1.2 to v2.1.3 and later, and then execute a "change/modify column" statement
@@ -262,6 +270,12 @@ const (
 
 // ExtraHandleName is the name of ExtraHandle Column.
 var ExtraHandleName = NewCIStr("_tidb_rowid")
+
+// ExtraMVCCTsName is the name of the column that shows the mvcc ts
+var ExtraMVCCTsName = NewCIStr("_tidb_mvcc_ts")
+
+// ExtraMVCCOpName is the name of the column that shows the mvcc operation type
+var ExtraMVCCOpName = NewCIStr("_tidb_mvcc_op")
 
 // ExtraPartitionIdName is the name of ExtraPartitionId Column.
 var ExtraPartitionIdName = NewCIStr("_tidb_pid")
@@ -629,6 +643,30 @@ func NewExtraHandleColInfo() *ColumnInfo {
 	colInfo.Flag = mysql.PriKeyFlag | mysql.NotNullFlag
 	colInfo.Tp = mysql.TypeLonglong
 	colInfo.Flen, colInfo.Decimal = mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeLonglong)
+	colInfo.Charset, colInfo.Collate = charset.CharsetBin, charset.CollationBin
+	return colInfo
+}
+
+// NewExtraMVCCTsColInfo mocks a column info for _tidb_mvcc_ts column.
+func NewExtraMVCCTsColInfo() *ColumnInfo {
+	colInfo := &ColumnInfo{
+		ID:   ExtraMVCCTsID,
+		Name: ExtraMVCCTsName,
+	}
+	colInfo.Tp = mysql.TypeLonglong
+	colInfo.Flen, colInfo.Decimal = mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeTimestamp)
+	colInfo.Charset, colInfo.Collate = charset.CharsetBin, charset.CollationBin
+	return colInfo
+}
+
+// NewExtraMVCCOpInfo mocks a column info for _tidb_mvcc_op column.
+func NewExtraMVCCOpColInfo() *ColumnInfo {
+	colInfo := &ColumnInfo{
+		ID:   ExtraMVCCOpID,
+		Name: ExtraMVCCOpName,
+	}
+	colInfo.Tp = mysql.TypeString
+	colInfo.Flen, colInfo.Decimal = mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeTimestamp)
 	colInfo.Charset, colInfo.Collate = charset.CharsetBin, charset.CollationBin
 	return colInfo
 }

@@ -979,6 +979,9 @@ type SessionVars struct {
 	// all the local data in each session, and finally report them to the remote
 	// regularly.
 	StmtStats *stmtstats.StatementStats
+
+	// NeedMvcc indicates whether the session needs mvcc info
+	NeedMvcc bool
 }
 
 // InitStatementContext initializes a StatementContext, the object is reused to reduce allocation.

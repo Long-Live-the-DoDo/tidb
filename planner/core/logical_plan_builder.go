@@ -3185,7 +3185,9 @@ func unfoldWildStar(field *ast.SelectField, outputName types.NameSlice, column [
 		}
 		if (dbName.L == "" || dbName.L == name.DBName.L) &&
 			(tblName.L == "" || tblName.L == name.TblName.L) &&
-			col.ID != model.ExtraHandleID {
+			col.ID != model.ExtraHandleID &&
+			col.ID != model.ExtraMVCCTsID && // 新增 MVCC 相关 extra 字段
+			col.ID != model.ExtraMVCCOpID {
 			colName := &ast.ColumnNameExpr{
 				Name: &ast.ColumnName{
 					Schema: name.DBName,
@@ -3784,6 +3786,28 @@ func (ds *DataSource) newExtraHandleSchemaCol() *expression.Column {
 	}
 }
 
+// newExtraMVCCTsSchemaCol is to new _tidb_mvcc_ts
+func (ds *DataSource) newExtraMVCCTsSchemaCol() *expression.Column {
+	tp := types.NewFieldType(mysql.TypeLonglong)
+	return &expression.Column{
+		RetType:  tp,
+		UniqueID: ds.ctx.GetSessionVars().AllocPlanColumnID(),
+		ID:       model.ExtraMVCCTsID,
+		OrigName: fmt.Sprintf("%v.%v.%v", ds.DBName, ds.tableInfo.Name, model.ExtraMVCCTsName),
+	}
+}
+
+// newExtraMVCCOpSchemaCol is to new _tidb_mvcc_op
+func (ds *DataSource) newExtraMVCCOpSchemaCol() *expression.Column {
+	tp := types.NewFieldType(mysql.TypeString)
+	return &expression.Column{
+		RetType:  tp,
+		UniqueID: ds.ctx.GetSessionVars().AllocPlanColumnID(),
+		ID:       model.ExtraMVCCOpID,
+		OrigName: fmt.Sprintf("%v.%v.%v", ds.DBName, ds.tableInfo.Name, model.ExtraMVCCOpName),
+	}
+}
+
 // addExtraPIDColumn add an extra PID column for partition table.
 // 'select ... for update' on a partition table need to know the partition ID
 // to construct the lock key, so this column is added to the chunk row.
@@ -4158,6 +4182,30 @@ func (b *PlanBuilder) buildDataSource(ctx context.Context, tn *ast.TableName, as
 			ds.TblCols = append(ds.TblCols, extraCol)
 		}
 	}
+
+	// add _tidb_mvcc_ts to column.
+	mvccTsCol := ds.newExtraMVCCTsSchemaCol()
+	ds.Columns = append(ds.Columns, model.NewExtraMVCCTsColInfo())
+	schema.Append(mvccTsCol)
+	names = append(names, &types.FieldName{
+		DBName:      dbName,
+		TblName:     tableInfo.Name,
+		ColName:     model.ExtraMVCCTsName,
+		OrigColName: model.ExtraMVCCTsName,
+	})
+	ds.TblCols = append(ds.TblCols, mvccTsCol)
+	// add _tidb_mvcc_op to column.
+	mvccOpCol := ds.newExtraMVCCOpSchemaCol()
+	ds.Columns = append(ds.Columns, model.NewExtraMVCCOpColInfo())
+	schema.Append(mvccOpCol)
+	names = append(names, &types.FieldName{
+		DBName:      dbName,
+		TblName:     tableInfo.Name,
+		ColName:     model.ExtraMVCCOpName,
+		OrigColName: model.ExtraMVCCOpName,
+	})
+	ds.TblCols = append(ds.TblCols, mvccOpCol)
+
 	ds.handleCols = handleCols
 	handleMap := make(map[int64][]HandleCols)
 	handleMap[tableInfo.ID] = []HandleCols{handleCols}
