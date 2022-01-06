@@ -94,6 +94,8 @@ const (
 	ActionAlterCacheTable               ActionType = 57
 	ActionAlterTableStatsOptions        ActionType = 58
 	ActionAlterNoCacheTable             ActionType = 59
+
+	ActionUpdateTableFlashbackTS ActionType = 60
 )
 
 var actionMap = map[ActionType]string{

@@ -1380,7 +1380,6 @@ import (
 	FieldAsName                     "Field alias name"
 	FieldAsNameOpt                  "Field alias name opt"
 	FieldTerminator                 "Field terminator"
-	FlashbackToNewName              "Flashback to new name"
 	HashString                      "Hashed string"
 	LikeEscapeOpt                   "like escape option"
 	LinesTerminated                 "Lines terminated by"
@@ -2472,24 +2471,31 @@ RecoverTableStmt:
  *  Flush Back Table Statement
  *
  *  Example:
+ *      FLASHBACK TABLE t1;
+ *      FLASHBACK TABLE t1 TO t2;
+ *      FLASHBACK TABLE t1 TO TIMESTAMP '2019-01-01 00:00:00';
  *
  *******************************************************************/
 FlashbackTableStmt:
-	"FLASHBACK" "TABLE" TableName FlashbackToNewName
+	"FLASHBACK" "TABLE" TableName
+	{
+		$$ = &ast.FlashBackTableStmt{
+			Table: $3.(*ast.TableName),
+		}
+	}
+|	"FLASHBACK" "TABLE" TableName "TO" Identifier
 	{
 		$$ = &ast.FlashBackTableStmt{
 			Table:   $3.(*ast.TableName),
-			NewName: $4,
+			NewName: $5,
 		}
 	}
-
-FlashbackToNewName:
+|	"FLASHBACK" "TABLE" TableName "TO" "TIMESTAMP" Expression
 	{
-		$$ = ""
-	}
-|	"TO" Identifier
-	{
-		$$ = $2
+		$$ = &ast.FlashBackTableStmt{
+			Table:  $3.(*ast.TableName),
+			TsExpr: $6.(ast.ExprNode),
+		}
 	}
 
 /*******************************************************************

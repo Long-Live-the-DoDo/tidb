@@ -3070,6 +3070,7 @@ func TestDDL(t *testing.T) {
 		// for flashback table.
 		{"flashback table t", true, "FLASHBACK TABLE `t`"},
 		{"flashback table t TO t1", true, "FLASHBACK TABLE `t` TO `t1`"},
+		{"flashback table t TO TIMESTAMP '2015-09-21 00:07:01'", true, "FLASHBACK TABLE `t` TO TIMESTAMP _UTF8MB4'2015-09-21 00:07:01'"},
 
 		// for remove partitioning
 		{"alter table t remove partitioning", true, "ALTER TABLE `t` REMOVE PARTITIONING"},

@@ -1653,7 +1653,7 @@ func (p *preprocessor) handleAsOfAndReadTS(node *ast.AsOfClause) {
 		// for stale read
 		// It means we meet following case:
 		// select statement with as of timestamp
-		ts, p.err = calculateTsExpr(p.ctx, node)
+		ts, p.err = calculateTsExpr(p.ctx, node.TsExpr)
 		if p.err != nil {
 			return
 		}
@@ -1663,7 +1663,7 @@ func (p *preprocessor) handleAsOfAndReadTS(node *ast.AsOfClause) {
 		}
 		if !p.initedLastSnapshotTS {
 			p.SnapshotTSEvaluator = func(ctx sessionctx.Context) (uint64, error) {
-				return calculateTsExpr(ctx, node)
+				return calculateTsExpr(ctx, node.TsExpr)
 			}
 			p.LastSnapshotTS = ts
 			p.IsStaleness = true

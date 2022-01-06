@@ -2735,7 +2735,7 @@ func (b *PlanBuilder) buildSimple(ctx context.Context, node ast.StmtNode) (Plan,
 	case *ast.BeginStmt:
 		readTS := b.ctx.GetSessionVars().TxnReadTS.PeakTxnReadTS()
 		if raw.AsOf != nil {
-			startTS, err := calculateTsExpr(b.ctx, raw.AsOf)
+			startTS, err := calculateTsExpr(b.ctx, raw.AsOf.TsExpr)
 			if err != nil {
 				return nil, err
 			}
@@ -2752,9 +2752,9 @@ func (b *PlanBuilder) buildSimple(ctx context.Context, node ast.StmtNode) (Plan,
 	return p, nil
 }
 
-// calculateTsExpr calculates the TsExpr of AsOfClause to get a StartTS.
-func calculateTsExpr(sctx sessionctx.Context, asOfClause *ast.AsOfClause) (uint64, error) {
-	tsVal, err := evalAstExpr(sctx, asOfClause.TsExpr)
+// calculateTsExpr calculates the timestamp expression to get a StartTS.
+func calculateTsExpr(sctx sessionctx.Context, tsExpr ast.ExprNode) (uint64, error) {
+	tsVal, err := evalAstExpr(sctx, tsExpr)
 	if err != nil {
 		return 0, err
 	}
@@ -4019,6 +4019,19 @@ func (b *PlanBuilder) buildDDL(ctx context.Context, node ast.DDLNode) (Plan, err
 	case *ast.RecoverTableStmt, *ast.FlashBackTableStmt:
 		// Recover table command can only be executed by administrator.
 		b.visitInfo = appendVisitInfo(b.visitInfo, mysql.SuperPriv, "", "", "", nil)
+		// Calculate the TsExpr if exists.
+		if flashbackNode, ok := v.(*ast.FlashBackTableStmt); ok && flashbackNode.TsExpr != nil {
+			// TODO: Check the session time location.
+			flashbackNode.NowTS = oracle.GoTimeToTS(time.Now())
+			var err error
+			flashbackNode.FlashbackTS, err = calculateTsExpr(b.ctx, flashbackNode.TsExpr)
+			if err != nil {
+				return nil, err
+			}
+			if flashbackNode.FlashbackTS >= flashbackNode.NowTS {
+				return nil, errors.Errorf("Flashback timestamp should be earlier than the current timestamp.")
+			}
+		}
 	case *ast.LockTablesStmt, *ast.UnlockTablesStmt:
 		// TODO: add Lock Table privilege check.
 	case *ast.CleanupTableLockStmt:

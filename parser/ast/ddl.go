@@ -3848,17 +3848,27 @@ type FlashBackTableStmt struct {
 
 	Table   *TableName
 	NewName string
+	// TsExpr is used to indicate the timestamp we will flashback this table to.
+	TsExpr      ExprNode
+	FlashbackTS uint64
+	NowTS       uint64
 }
 
 // Restore implements Node interface.
 func (n *FlashBackTableStmt) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord("FLASHBACK TABLE ")
 	if err := n.Table.Restore(ctx); err != nil {
-		return errors.Annotate(err, "An error occurred while splicing RecoverTableStmt Table")
+		return errors.Annotate(err, "An error occurred while splicing FlashBackTableStmt Table")
 	}
 	if len(n.NewName) > 0 {
 		ctx.WriteKeyWord(" TO ")
 		ctx.WriteName(n.NewName)
+	}
+	if n.TsExpr != nil {
+		ctx.WriteKeyWord(" TO TIMESTAMP ")
+		if err := n.TsExpr.Restore(ctx); err != nil {
+			return errors.Annotate(err, "An error occurred while restore FlashBackTableStmt.Expr")
+		}
 	}
 	return nil
 }
@@ -3877,6 +3887,13 @@ func (n *FlashBackTableStmt) Accept(v Visitor) (Node, bool) {
 			return n, false
 		}
 		n.Table = node.(*TableName)
+	}
+	if n.TsExpr != nil {
+		node, ok := n.TsExpr.Accept(v)
+		if !ok {
+			return n, false
+		}
+		n.TsExpr = node.(ExprNode)
 	}
 	return v.Leave(n)
 }

@@ -165,7 +165,11 @@ func (e *DDLExec) Next(ctx context.Context, req *chunk.Chunk) (err error) {
 	case *ast.RecoverTableStmt:
 		err = e.executeRecoverTable(x)
 	case *ast.FlashBackTableStmt:
-		err = e.executeFlashbackTable(x)
+		if x.TsExpr == nil {
+			err = e.executeFlashbackTable(x)
+		} else {
+			err = e.executeFlashbackTableByTimestamp(x)
+		}
 	case *ast.RenameTableStmt:
 		err = e.executeRenameTable(x)
 	case *ast.TruncateTableStmt:
@@ -815,6 +819,21 @@ func (e *DDLExec) executeFlashbackTable(s *ast.FlashBackTableStmt) error {
 	// Call DDL RecoverTable.
 	err = domain.GetDomain(e.ctx).DDL().RecoverTable(e.ctx, recoverInfo)
 	return err
+}
+
+func (e *DDLExec) executeFlashbackTableByTimestamp(s *ast.FlashBackTableStmt) error {
+	schemaName := s.Table.Schema.L
+	if len(schemaName) == 0 {
+		schemaName = strings.ToLower(e.ctx.GetSessionVars().CurrentDB)
+	}
+	if len(schemaName) == 0 {
+		return errors.Trace(core.ErrNoDB)
+	}
+	ti := ast.Ident{Schema: model.NewCIStr(schemaName), Name: s.Table.Name}
+	if _, ok := e.getLocalTemporaryTable(ti.Schema, ti.Name); ok {
+		return ddl.ErrUnsupportedLocalTempTableDDL.GenWithStackByArgs("FLASHBACK TABLE")
+	}
+	return domain.GetDomain(e.ctx).DDL().UpdateTableFlashbackTS(e.ctx, ti, s.FlashbackTS, s.NowTS)
 }
 
 func (e *DDLExec) executeLockTables(s *ast.LockTablesStmt) error {
