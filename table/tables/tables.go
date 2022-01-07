@@ -20,6 +20,7 @@ package tables
 
 import (
 	"context"
+	"encoding/binary"
 	"math"
 	"strconv"
 	"strings"
@@ -50,6 +51,8 @@ import (
 	"github.com/pingcap/tidb/util/tableutil"
 	"github.com/pingcap/tipb/go-binlog"
 	"github.com/pingcap/tipb/go-tipb"
+	"github.com/tikv/client-go/v2/config"
+	"github.com/tikv/client-go/v2/rawkv"
 	"go.uber.org/zap"
 )
 
@@ -430,6 +433,166 @@ func (t *TableCommon) UpdateRecord(ctx context.Context, sctx sessionctx.Context,
 		return err
 	}
 	memBuffer.Release(sh)
+	if shouldWriteBinlog(sctx, t.meta) {
+		if !t.meta.PKIsHandle && !t.meta.IsCommonHandle {
+			binlogColIDs = append(binlogColIDs, model.ExtraHandleID)
+			binlogOldRow = append(binlogOldRow, types.NewIntDatum(h.IntValue()))
+			binlogNewRow = append(binlogNewRow, types.NewIntDatum(h.IntValue()))
+		}
+		err = t.addUpdateBinlog(sctx, binlogOldRow, binlogNewRow, binlogColIDs)
+		if err != nil {
+			return err
+		}
+	}
+	colSize := make(map[int64]int64, len(t.Cols()))
+	for id, col := range t.Cols() {
+		size, err := codec.EstimateValueSize(sc, newData[id])
+		if err != nil {
+			continue
+		}
+		newLen := size - 1
+		size, err = codec.EstimateValueSize(sc, oldData[id])
+		if err != nil {
+			continue
+		}
+		oldLen := size - 1
+		colSize[col.ID] = int64(newLen - oldLen)
+	}
+	sessVars.TxnCtx.UpdateDeltaForTable(t.physicalTableID, 0, 1, colSize)
+	return nil
+}
+
+// RawUpdateRecord is similar to UpdateRecord, but use RawPut.
+func (t *TableCommon) RawUpdateRecord(ctx context.Context, sctx sessionctx.Context, h kv.Handle, oldData, newData []types.Datum, touched []bool, commitTs uint64, op byte) error {
+	txn, err := sctx.Txn(true)
+	if err != nil {
+		return err
+	}
+
+	if m := t.Meta(); m.TempTableType != model.TempTableNone {
+		if tmpTable := addTemporaryTable(sctx, m); tmpTable != nil {
+			if err := checkTempTableSize(sctx, tmpTable, m); err != nil {
+				return err
+			}
+			defer handleTempTableSize(tmpTable, txn.Size(), txn)
+		}
+	}
+
+	var colIDs, binlogColIDs []int64
+	var row, binlogOldRow, binlogNewRow []types.Datum
+	numColsCap := len(newData) + 1 // +1 for the extra handle column that we may need to append.
+	colIDs = make([]int64, 0, numColsCap)
+	row = make([]types.Datum, 0, numColsCap)
+	if shouldWriteBinlog(sctx, t.meta) {
+		binlogColIDs = make([]int64, 0, numColsCap)
+		binlogOldRow = make([]types.Datum, 0, numColsCap)
+		binlogNewRow = make([]types.Datum, 0, numColsCap)
+	}
+
+	for _, col := range t.Columns {
+		var value types.Datum
+		if col.State == model.StateDeleteOnly || col.State == model.StateDeleteReorganization {
+			if col.ChangeStateInfo != nil {
+				// TODO: Check overflow or ignoreTruncate.
+				value, err = table.CastValue(sctx, oldData[col.DependencyColumnOffset], col.ColumnInfo, false, false)
+				if err != nil {
+					logutil.BgLogger().Info("update record cast value failed", zap.Any("col", col), zap.Uint64("txnStartTS", txn.StartTS()),
+						zap.String("handle", h.String()), zap.Any("val", oldData[col.DependencyColumnOffset]), zap.Error(err))
+					return err
+				}
+				oldData = append(oldData, value)
+				touched = append(touched, touched[col.DependencyColumnOffset])
+			}
+			continue
+		}
+		if col.State != model.StatePublic {
+			// If col is in write only or write reorganization state we should keep the oldData.
+			// Because the oldData must be the original data(it's changed by other TiDBs.) or the original default value.
+			// TODO: Use newData directly.
+			value = oldData[col.Offset]
+			if col.ChangeStateInfo != nil {
+				// TODO: Check overflow or ignoreTruncate.
+				value, err = table.CastValue(sctx, newData[col.DependencyColumnOffset], col.ColumnInfo, false, false)
+				if err != nil {
+					return err
+				}
+				newData[col.Offset] = value
+				touched[col.Offset] = touched[col.DependencyColumnOffset]
+			}
+		} else {
+			value = newData[col.Offset]
+		}
+		if !t.canSkip(col, &value) {
+			colIDs = append(colIDs, col.ID)
+			row = append(row, value)
+		}
+		if shouldWriteBinlog(sctx, t.meta) && !t.canSkipUpdateBinlog(col, value) {
+			binlogColIDs = append(binlogColIDs, col.ID)
+			binlogOldRow = append(binlogOldRow, oldData[col.Offset])
+			binlogNewRow = append(binlogNewRow, value)
+		}
+	}
+	sessVars := sctx.GetSessionVars()
+	// rebuild index
+	if !sessVars.InTxn() {
+		savePresumeKeyNotExist := sessVars.PresumeKeyNotExists
+		if !sessVars.ConstraintCheckInPlace && sessVars.TxnCtx.IsPessimistic {
+			sessVars.PresumeKeyNotExists = true
+		}
+		err = t.rebuildIndices(sctx, txn, h, touched, oldData, newData, table.WithCtx(ctx))
+		sessVars.PresumeKeyNotExists = savePresumeKeyNotExist
+		if err != nil {
+			return err
+		}
+	} else {
+		err = t.rebuildIndices(sctx, txn, h, touched, oldData, newData, table.WithCtx(ctx))
+		if err != nil {
+			return err
+		}
+	}
+
+	key := t.RecordKey(h)
+	encodedKey := codec.EncodeBytes([]byte{}, key)
+	// compose the writeCF key
+	commitTsBytes := make([]byte, 8)
+	if commitTs == 0 {
+		return nil
+	}
+	binary.BigEndian.PutUint64(commitTsBytes, ^commitTs)
+	encodedKey = append(encodedKey, commitTsBytes...)
+
+	sc, rd := sessVars.StmtCtx, &sessVars.RowEncoder
+	value, err := tablecodec.EncodeRow(sc, row, colIDs, nil, nil, rd)
+	if err != nil {
+		return err
+	}
+	// construct the writeCF value
+	// encoded value: OP _FLAG + START_TS + LONG_VALUE_SUFFIX + LONG_VALUE_LEN + VALUE
+	// encoded value: []byte{'P'(or 'D'), VarU64(0)..., 'V', U32(len(value)))..., value...}
+	encodedValue := make([]byte, 7)
+	encodedValue[0] = op
+	encodedValue[1] = 0
+	encodedValue[2] = 'V'
+	binary.BigEndian.PutUint32(encodedValue[3:7], uint32(len(value)))
+	encodedValue = append(encodedValue, value...)
+
+	// Raw input
+	addrs := []string{"127.0.0.1:2379"}
+	// get pd addr
+	if store, ok := sctx.GetStore().(interface{ EtcdAddrs() ([]string, error) }); ok {
+		if addrs, err = store.EtcdAddrs(); err != nil {
+			return err
+		}
+	}
+	cli, err := rawkv.NewClient(ctx, addrs, config.DefaultConfig().Security)
+	if err != nil {
+		return err
+	}
+	err = cli.PutWithCF(ctx, encodedKey, encodedValue, "write")
+	if err != nil {
+		return err
+	}
+
 	if shouldWriteBinlog(sctx, t.meta) {
 		if !t.meta.PKIsHandle && !t.meta.IsCommonHandle {
 			binlogColIDs = append(binlogColIDs, model.ExtraHandleID)
