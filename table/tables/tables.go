@@ -1838,6 +1838,12 @@ func BuildTableScanFromInfos(tableInfo *model.TableInfo, columnInfos []*model.Co
 		PrimaryColumnIds: pkColIds,
 		NeedMvcc:         needMvcc,
 	}
+	for _, flashbackTS := range tableInfo.FlashbackTSs {
+		tsExec.FlashbackTimestamps = append(tsExec.FlashbackTimestamps, &tipb.FlashbackTimestamp{
+			Start: flashbackTS[0],
+			End:   flashbackTS[1],
+		})
+	}
 	if tableInfo.IsCommonHandle {
 		tsExec.PrimaryPrefixColumnIds = PrimaryPrefixColumnIDs(tableInfo)
 	}
