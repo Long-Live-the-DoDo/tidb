@@ -365,6 +365,11 @@ const (
 		oldReadLease bigint(20) NOT NULL DEFAULT 0,
 		PRIMARY KEY (tid)
 	);`
+	// GC savepoints
+	CreateGCSavePointTable = `CREATE TABLE IF NOT EXISTS mysql.gc_save_point (
+		save_point TIMESTAMP,
+		UNIQUE KEY (save_point)
+	);`
 )
 
 // bootstrap initiates system DB for a store.
@@ -1739,6 +1744,7 @@ func doDDLWorks(s Session) {
 	mustExecute(s, CreateColumnStatsUsageTable)
 	// Create table_cache_meta table.
 	mustExecute(s, CreateTableCacheMetaTable)
+	mustExecute(s, CreateGCSavePointTable)
 }
 
 // doDMLWorks executes DML statements in bootstrap stage.
