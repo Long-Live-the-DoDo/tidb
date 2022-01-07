@@ -169,7 +169,7 @@ const (
 	gcWorkerServiceSafePointID = "gc_worker"
 
 	gcSavePointIntervalKey     = "tikv_gc_save_point_interval"
-	gcDefaultSavePointInterval = time.Hour
+	gcDefaultSavePointInterval = time.Minute * 20
 	gcSavePointLifeTimeKey     = "tikv_gc_save_point_life_time"
 	gcDefaultSavePointLifeTime = time.Hour * 24
 
