@@ -1538,7 +1538,7 @@ func (w *GCWorker) uploadSafePointToPD(ctx context.Context, safePoint uint64) er
 
 	bo := tikv.NewBackofferWithVars(ctx, gcOneRegionMaxBackoff, nil)
 	for {
-		newSafePoint, err = w.pdClient.UpdateGCSafePoint(ctx, safePoint)
+		newSafePoint, err = w.pdClient.UpdateGCSafePoint(ctx, safePoint, nil)
 		if err != nil {
 			if errors.Cause(err) == context.Canceled {
 				return errors.Trace(err)

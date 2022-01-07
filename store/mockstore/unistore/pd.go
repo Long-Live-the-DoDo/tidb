@@ -121,3 +121,15 @@ func (c *pdClient) GetRegionFromMember(ctx context.Context, key []byte, memberUR
 func (c *pdClient) UpdateOption(option pd.DynamicOption, value interface{}) error {
 	return nil
 }
+
+func (c *pdClient) LoadGlobalConfig(ctx context.Context, s []string) ([]pd.GlobalConfigItem, error) {
+	return nil, nil
+}
+
+func (c *pdClient) StoreGlobalConfig(ctx context.Context, items []pd.GlobalConfigItem) error {
+	return nil
+}
+
+func (c *pdClient) WatchGlobalConfig(context.Context) (chan []pd.GlobalConfigItem, error) {
+	return nil, nil
+}
