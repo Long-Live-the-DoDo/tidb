@@ -846,6 +846,8 @@ func (w *worker) runDDLJob(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, 
 		ver, err = onAlterCacheTable(t, job)
 	case model.ActionAlterNoCacheTable:
 		ver, err = onAlterNoCacheTable(t, job)
+	case model.ActionUpdateTableFlashbackTS:
+		ver, err = w.onUpdateTableFlashbackTS(t, job)
 	default:
 		// Invalid job, cancel it.
 		job.State = model.JobStateCancelled

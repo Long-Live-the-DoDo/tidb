@@ -359,6 +359,8 @@ type TableInfo struct {
 
 	// StatsOptions is used when do analyze/auto-analyze for each table
 	StatsOptions *StatsOptions `json:"stats_options"`
+
+	FlashbackTSs [][]uint64 `json:"flashback_timestamps"`
 }
 type TableCacheStatusType int
 

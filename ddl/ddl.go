@@ -177,6 +177,8 @@ type DDL interface {
 	GetHook() Callback
 	// SetHook sets the hook.
 	SetHook(h Callback)
+
+	UpdateTableFlashbackTS(ctx sessionctx.Context, tableIdent ast.Ident, flaskbackTS, nowTS uint64) error
 }
 
 type limitJobTask struct {

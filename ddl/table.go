@@ -35,6 +35,7 @@ import (
 	"github.com/pingcap/tidb/parser/charset"
 	"github.com/pingcap/tidb/parser/model"
 	field_types "github.com/pingcap/tidb/parser/types"
+	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/tablecodec"
@@ -448,6 +449,16 @@ func checkSafePoint(w *worker, snapshotTS uint64) error {
 	defer w.sessPool.put(ctx)
 
 	return gcutil.ValidateSnapshot(ctx, snapshotTS)
+}
+
+func getSafePoint(w *worker) (uint64, error) {
+	ctx, err := w.sessPool.get()
+	if err != nil {
+		return 0, errors.Trace(err)
+	}
+	defer w.sessPool.put(ctx)
+
+	return gcutil.GetGCSafePoint(ctx)
 }
 
 func getTable(store kv.Storage, schemaID int64, tblInfo *model.TableInfo) (table.Table, error) {
@@ -885,6 +896,48 @@ func onModifyTableComment(t *meta.Meta, job *model.Job) (ver int64, _ error) {
 	}
 
 	tblInfo.Comment = comment
+	ver, err = updateVersionAndTableInfo(t, job, tblInfo, true)
+	if err != nil {
+		return ver, errors.Trace(err)
+	}
+	job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, tblInfo)
+	return ver, nil
+}
+
+func (w *worker) onUpdateTableFlashbackTS(t *meta.Meta, job *model.Job) (ver int64, _ error) {
+	var flashbackTS, nowTS uint64
+	if err := job.DecodeArgs(&flashbackTS, &nowTS); err != nil {
+		job.State = model.JobStateCancelled
+		return ver, errors.Trace(err)
+	}
+
+	safePoint, err := getSafePoint(w)
+	if err != nil {
+		job.State = model.JobStateCancelled
+		return ver, errors.Trace(err)
+	}
+	if flashbackTS < safePoint {
+		return ver, variable.ErrSnapshotTooOld.GenWithStackByArgs(model.TSConvert2Time(safePoint).String())
+	}
+
+	tblInfo, err := getTableInfoAndCancelFaultJob(t, job, job.SchemaID)
+	if err != nil {
+		return ver, errors.Trace(err)
+	}
+	if len(tblInfo.FlashbackTSs) == 0 {
+		tblInfo.FlashbackTSs = make([][]uint64, 0, 1)
+	} else {
+		newFlashbackTSs := make([][]uint64, 0)
+		// Clean up the expired flashback timestamps.
+		for _, tsPair := range tblInfo.FlashbackTSs {
+			if tsPair[1] < safePoint {
+				continue
+			}
+			newFlashbackTSs = append(newFlashbackTSs, tsPair)
+		}
+		tblInfo.FlashbackTSs = newFlashbackTSs
+	}
+	tblInfo.FlashbackTSs = append(tblInfo.FlashbackTSs, []uint64{flashbackTS, nowTS})
 	ver, err = updateVersionAndTableInfo(t, job, tblInfo, true)
 	if err != nil {
 		return ver, errors.Trace(err)

@@ -6631,3 +6631,29 @@ func (d *ddl) AlterTableNoCache(ctx sessionctx.Context, ti ast.Ident) (err error
 	err = d.doDDLJob(ctx, job)
 	return d.callHookOnChanged(err)
 }
+
+func (d *ddl) UpdateTableFlashbackTS(ctx sessionctx.Context, tableIdent ast.Ident, flaskbackTS, nowTS uint64) error {
+	is := d.infoCache.GetLatest()
+	schema, ok := is.SchemaByName(tableIdent.Schema)
+	if !ok {
+		return infoschema.ErrDatabaseNotExists.GenWithStackByArgs(tableIdent.Schema)
+	}
+
+	tb, err := is.TableByName(tableIdent.Schema, tableIdent.Name)
+	if err != nil {
+		return errors.Trace(infoschema.ErrTableNotExists.GenWithStackByArgs(tableIdent.Schema, tableIdent.Name))
+	}
+
+	job := &model.Job{
+		SchemaID:   schema.ID,
+		TableID:    tb.Meta().ID,
+		SchemaName: schema.Name.L,
+		Type:       model.ActionUpdateTableFlashbackTS,
+		BinlogInfo: &model.HistoryInfo{},
+		Args:       []interface{}{flaskbackTS, nowTS},
+	}
+
+	err = d.doDDLJob(ctx, job)
+	err = d.callHookOnChanged(err)
+	return errors.Trace(err)
+}
