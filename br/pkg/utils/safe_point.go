@@ -46,7 +46,7 @@ func (sp BRServiceSafePoint) MarshalLogObject(encoder zapcore.ObjectEncoder) err
 // getGCSafePoint returns the current gc safe point.
 // TODO: Some cluster may not enable distributed GC.
 func getGCSafePoint(ctx context.Context, pdClient pd.Client) (uint64, error) {
-	safePoint, err := pdClient.UpdateGCSafePoint(ctx, 0)
+	safePoint, err := pdClient.UpdateGCSafePoint(ctx, 0, nil)
 	if err != nil {
 		return 0, errors.Trace(err)
 	}

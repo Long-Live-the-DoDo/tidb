@@ -769,7 +769,7 @@ func (pd *MockPD) GetGCSafePoint(ctx context.Context) (uint64, error) {
 // TiKV will check it and do GC themselves if necessary.
 // If the given safePoint is less than the current one, it will not be updated.
 // Returns the new safePoint after updating.
-func (pd *MockPD) UpdateGCSafePoint(ctx context.Context, safePoint uint64) (uint64, error) {
+func (pd *MockPD) UpdateGCSafePoint(ctx context.Context, safePoint uint64, savePoints []uint64) (uint64, error) {
 	for {
 		old := atomic.LoadUint64(&pd.gcSafePoint)
 		if safePoint <= old {
