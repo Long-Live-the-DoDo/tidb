@@ -4799,6 +4799,7 @@ func (b *PlanBuilder) buildUpdate(ctx context.Context, update *ast.UpdateStmt) (
 		OrderedList:               orderedList,
 		AllAssignmentsAreConstant: allAssignmentsAreConstant,
 		VirtualAssignmentsOffset:  len(update.List),
+		RawUpdate:                 b.ctx.GetSessionVars().NeedMvcc,
 	}.Init(b.ctx)
 	updt.names = p.OutputNames()
 	// We cannot apply projection elimination when building the subplan, because

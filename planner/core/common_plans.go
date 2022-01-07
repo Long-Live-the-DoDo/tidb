@@ -964,6 +964,8 @@ type Update struct {
 	PartitionedTable []table.PartitionedTable
 
 	tblID2Table map[int64]table.Table
+
+	RawUpdate bool
 }
 
 // Delete represents a delete plan.

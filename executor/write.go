@@ -50,7 +50,7 @@ var (
 //     1. changed (bool) : does the update really change the row values. e.g. update set i = 1 where i = 1;
 //     2. err (error) : error in the update.
 func updateRecord(ctx context.Context, sctx sessionctx.Context, h kv.Handle, oldData, newData []types.Datum, modified []bool, t table.Table,
-	onDup bool, memTracker *memory.Tracker) (bool, error) {
+	onDup bool, memTracker *memory.Tracker, rawUpdate bool, commitTs uint64, op byte) (bool, error) {
 	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
 		span1 := span.Tracer().StartSpan("executor.updateRecord", opentracing.ChildOf(span.Context()))
 		defer span1.Finish()
@@ -199,12 +199,22 @@ func updateRecord(ctx context.Context, sctx sessionctx.Context, h kv.Handle, old
 			return updated, err
 		}
 	} else {
-		// Update record to new value and update index.
-		if err = t.UpdateRecord(ctx, sctx, h, oldData, newData, modified); err != nil {
-			if terr, ok := errors.Cause(err).(*terror.Error); sctx.GetSessionVars().StmtCtx.IgnoreNoPartition && ok && terr.Code() == errno.ErrNoPartitionForGivenValue {
-				return false, nil
+		if rawUpdate {
+			if realT, ok := t.(interface {
+				RawUpdateRecord(ctx context.Context, sctx sessionctx.Context, h kv.Handle, currData, newData []types.Datum, touched []bool, commitTs uint64, op byte) error
+			}); ok {
+				if err = realT.RawUpdateRecord(ctx, sctx, h, oldData, newData, modified, commitTs, op); err != nil {
+					return false, err
+				}
 			}
-			return false, err
+		} else {
+			// Update record to new value and update index.
+			if err = t.UpdateRecord(ctx, sctx, h, oldData, newData, modified); err != nil {
+				if terr, ok := errors.Cause(err).(*terror.Error); sctx.GetSessionVars().StmtCtx.IgnoreNoPartition && ok && terr.Code() == errno.ErrNoPartitionForGivenValue {
+					return false, nil
+				}
+				return false, err
+			}
 		}
 
 	}
