@@ -48,6 +48,7 @@ import (
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/util/admin"
+	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/logutil"
 	tikverr "github.com/tikv/client-go/v2/error"
@@ -167,6 +168,11 @@ const (
 
 	gcWorkerServiceSafePointID = "gc_worker"
 
+	gcSavePointIntervalKey     = "tikv_gc_save_point_interval"
+	gcDefaultSavePointInterval = time.Minute * 20
+	gcSavePointLifeTimeKey     = "tikv_gc_save_point_life_time"
+	gcDefaultSavePointLifeTime = time.Hour * 24
+
 	// Status var names start with tidb_%
 	tidbGCLastRunTime = "tidb_gc_last_run_time"
 	tidbGCLeaderDesc  = "tidb_gc_leader_desc"
@@ -178,18 +184,20 @@ const (
 var gcSafePointCacheInterval = tikv.GcSafePointCacheInterval
 
 var gcVariableComments = map[string]string{
-	gcLeaderUUIDKey:      "Current GC worker leader UUID. (DO NOT EDIT)",
-	gcLeaderDescKey:      "Host name and pid of current GC leader. (DO NOT EDIT)",
-	gcLeaderLeaseKey:     "Current GC worker leader lease. (DO NOT EDIT)",
-	gcLastRunTimeKey:     "The time when last GC starts. (DO NOT EDIT)",
-	gcRunIntervalKey:     "GC run interval, at least 10m, in Go format.",
-	gcLifeTimeKey:        "All versions within life time will not be collected by GC, at least 10m, in Go format.",
-	gcSafePointKey:       "All versions after safe point can be accessed. (DO NOT EDIT)",
-	gcConcurrencyKey:     "How many goroutines used to do GC parallel, [1, 128], default 2",
-	gcEnableKey:          "Current GC enable status",
-	gcModeKey:            "Mode of GC, \"central\" or \"distributed\"",
-	gcAutoConcurrencyKey: "Let TiDB pick the concurrency automatically. If set false, tikv_gc_concurrency will be used",
-	gcScanLockModeKey:    "Mode of scanning locks, \"physical\" or \"legacy\"",
+	gcLeaderUUIDKey:        "Current GC worker leader UUID. (DO NOT EDIT)",
+	gcLeaderDescKey:        "Host name and pid of current GC leader. (DO NOT EDIT)",
+	gcLeaderLeaseKey:       "Current GC worker leader lease. (DO NOT EDIT)",
+	gcLastRunTimeKey:       "The time when last GC starts. (DO NOT EDIT)",
+	gcRunIntervalKey:       "GC run interval, at least 10m, in Go format.",
+	gcLifeTimeKey:          "All versions within life time will not be collected by GC, at least 10m, in Go format.",
+	gcSafePointKey:         "All versions after safe point can be accessed. (DO NOT EDIT)",
+	gcConcurrencyKey:       "How many goroutines used to do GC parallel, [1, 128], default 2",
+	gcEnableKey:            "Current GC enable status",
+	gcModeKey:              "Mode of GC, \"central\" or \"distributed\"",
+	gcAutoConcurrencyKey:   "Let TiDB pick the concurrency automatically. If set false, tikv_gc_concurrency will be used",
+	gcScanLockModeKey:      "Mode of scanning locks, \"physical\" or \"legacy\"",
+	gcSavePointIntervalKey: "The interval to create save point automatically, in Go format.",
+	gcSavePointLifeTimeKey: "Let TiDB remove old save points automatically, in Go format.",
 }
 
 const (
@@ -302,7 +310,7 @@ func (w *GCWorker) leaderTick(ctx context.Context) error {
 		return nil
 	}
 
-	ok, safePoint, err := w.prepare()
+	ok, safePoint, savePoints, err := w.prepare()
 	if err != nil || !ok {
 		if err != nil {
 			metrics.GCJobFailureCounter.WithLabelValues("prepare").Inc()
@@ -329,16 +337,17 @@ func (w *GCWorker) leaderTick(ctx context.Context) error {
 	logutil.Logger(ctx).Info("[gc worker] starts the whole job",
 		zap.String("uuid", w.uuid),
 		zap.Uint64("safePoint", safePoint),
+		zap.Uint64s("savePoints", savePoints),
 		zap.Int("concurrency", concurrency))
 	go func() {
-		w.done <- w.runGCJob(ctx, safePoint, concurrency)
+		w.done <- w.runGCJob(ctx, safePoint, savePoints, concurrency)
 	}()
 	return nil
 }
 
 // prepare checks preconditions for starting a GC job. It returns a bool
 // that indicates whether the GC job should start and the new safePoint.
-func (w *GCWorker) prepare() (bool, uint64, error) {
+func (w *GCWorker) prepare() (bool, uint64, []uint64, error) {
 	// Add a transaction here is to prevent following situations:
 	// 1. GC check gcEnable is true, continue to do GC
 	// 2. The user sets gcEnable to false
@@ -350,51 +359,94 @@ func (w *GCWorker) prepare() (bool, uint64, error) {
 	defer se.Close()
 	_, err := se.ExecuteInternal(ctx, "BEGIN")
 	if err != nil {
-		return false, 0, errors.Trace(err)
+		return false, 0, nil, errors.Trace(err)
 	}
-	doGC, safePoint, err := w.checkPrepare(ctx)
+	doGC, safePoint, savePoints, err := w.checkPrepare(ctx)
 	if doGC {
 		err = se.CommitTxn(ctx)
 		if err != nil {
-			return false, 0, errors.Trace(err)
+			return false, 0, nil, errors.Trace(err)
 		}
 	} else {
 		se.RollbackTxn(ctx)
 	}
-	return doGC, safePoint, errors.Trace(err)
+	return doGC, safePoint, savePoints, errors.Trace(err)
 }
 
-func (w *GCWorker) checkPrepare(ctx context.Context) (bool, uint64, error) {
+func (w *GCWorker) prepareSavePoints(safePoint time.Time) ([]uint64, error) {
+	savePointInterval, savePointLifetime, err := w.loadSavePointConfig()
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	se := createSession(w.store)
+	defer se.Close()
+	// drop old save points
+	_, err = se.ExecuteInternal(context.Background(), `DELETE FROM mysql.gc_save_point WHERE save_point < %?`, time.Now().Add(-savePointLifetime))
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	// create new save points
+	for sp := time.Now().Truncate(savePointInterval); sp.After(safePoint); sp = sp.Add(-savePointInterval) {
+		_, err = se.ExecuteInternal(context.Background(), `INSERT INTO mysql.gc_save_point (save_point) VALUES (%?) ON DUPLICATE KEY UPDATE save_point=save_point`, sp)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+	}
+	// get all save points
+	var savePoints []uint64
+	rs, err := se.ExecuteInternal(context.Background(), `SELECT * FROM mysql.gc_save_point ORDER BY save_point`)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	defer rs.Close()
+	req := rs.NewChunk(nil)
+	it := chunk.NewIterator4Chunk(req)
+	err = rs.Next(context.Background(), req)
+	for err == nil && req.NumRows() != 0 {
+		for row := it.Begin(); row != it.End(); row = it.Next() {
+			t, _ := row.GetTime(0).GoTime(time.Local)
+			savePoints = append(savePoints, uint64(t.Unix()<<18))
+		}
+		err = rs.Next(context.Background(), req)
+	}
+	return savePoints, nil
+}
+
+func (w *GCWorker) checkPrepare(ctx context.Context) (bool, uint64, []uint64, error) {
 	enable, err := w.checkGCEnable()
 	if err != nil {
-		return false, 0, errors.Trace(err)
+		return false, 0, nil, errors.Trace(err)
 	}
 
 	if !enable {
 		logutil.Logger(ctx).Warn("[gc worker] gc status is disabled.")
-		return false, 0, nil
+		return false, 0, nil, nil
 	}
 	now, err := w.getOracleTime()
 	if err != nil {
-		return false, 0, errors.Trace(err)
-	}
-	ok, err := w.checkGCInterval(now)
-	if err != nil || !ok {
-		return false, 0, errors.Trace(err)
+		return false, 0, nil, errors.Trace(err)
 	}
 	newSafePoint, newSafePointValue, err := w.calcNewSafePoint(ctx, now)
 	if err != nil || newSafePoint == nil {
-		return false, 0, errors.Trace(err)
+		return false, 0, nil, errors.Trace(err)
+	}
+	savePoints, err := w.prepareSavePoints(*newSafePoint)
+	if err != nil {
+		return false, 0, nil, errors.Trace(err)
+	}
+	ok, err := w.checkGCInterval(now)
+	if err != nil || !ok {
+		return false, 0, nil, errors.Trace(err)
 	}
 	err = w.saveTime(gcLastRunTimeKey, now)
 	if err != nil {
-		return false, 0, errors.Trace(err)
+		return false, 0, nil, errors.Trace(err)
 	}
 	err = w.saveTime(gcSafePointKey, *newSafePoint)
 	if err != nil {
-		return false, 0, errors.Trace(err)
+		return false, 0, nil, errors.Trace(err)
 	}
-	return true, newSafePointValue, nil
+	return true, newSafePointValue, savePoints, nil
 }
 
 func (w *GCWorker) calcGlobalMinStartTS(ctx context.Context) (uint64, error) {
@@ -616,7 +668,7 @@ func (w *GCWorker) setGCWorkerServiceSafePoint(ctx context.Context, safePoint ui
 	return safePoint, nil
 }
 
-func (w *GCWorker) runGCJob(ctx context.Context, safePoint uint64, concurrency int) error {
+func (w *GCWorker) runGCJob(ctx context.Context, safePoint uint64, savePoints []uint64, concurrency int) error {
 	failpoint.Inject("mockRunGCJobFail", func() {
 		failpoint.Return(errors.New("mock failure of runGCJoB"))
 	})
@@ -664,7 +716,7 @@ func (w *GCWorker) runGCJob(ctx context.Context, safePoint uint64, concurrency i
 	}
 
 	if w.checkUseDistributedGC() {
-		err = w.uploadSafePointToPD(ctx, safePoint)
+		err = w.uploadSafePointToPD(ctx, safePoint, savePoints)
 		if err != nil {
 			logutil.Logger(ctx).Error("[gc worker] failed to upload safe point to PD",
 				zap.String("uuid", w.uuid),
@@ -938,6 +990,18 @@ func (w *GCWorker) getStoresMapForGC(ctx context.Context) (map[uint64]*metapb.St
 	}
 
 	return storesMap, nil
+}
+
+func (w *GCWorker) loadSavePointConfig() (time.Duration, time.Duration, error) {
+	interval, err := w.loadDurationWithDefault(gcSavePointIntervalKey, gcDefaultSavePointInterval)
+	if err != nil {
+		return gcDefaultSavePointInterval, gcDefaultSavePointLifeTime, err
+	}
+	lifeTime, err := w.loadDurationWithDefault(gcSavePointLifeTimeKey, gcDefaultSavePointLifeTime)
+	if err != nil {
+		return *interval, gcDefaultSavePointLifeTime, err
+	}
+	return *interval, *lifeTime, nil
 }
 
 func (w *GCWorker) loadGCConcurrencyWithDefault() (int, error) {
@@ -1532,13 +1596,13 @@ func (w *GCWorker) resolveLocksAcrossRegions(ctx context.Context, locks []*txnlo
 
 const gcOneRegionMaxBackoff = 20000
 
-func (w *GCWorker) uploadSafePointToPD(ctx context.Context, safePoint uint64) error {
+func (w *GCWorker) uploadSafePointToPD(ctx context.Context, safePoint uint64, savePoints []uint64) error {
 	var newSafePoint uint64
 	var err error
 
 	bo := tikv.NewBackofferWithVars(ctx, gcOneRegionMaxBackoff, nil)
 	for {
-		newSafePoint, err = w.pdClient.UpdateGCSafePoint(ctx, safePoint, nil)
+		newSafePoint, err = w.pdClient.UpdateGCSafePoint(ctx, safePoint, savePoints)
 		if err != nil {
 			if errors.Cause(err) == context.Canceled {
 				return errors.Trace(err)
@@ -2059,7 +2123,7 @@ func RunDistributedGCJob(ctx context.Context, s tikv.Storage, pd pd.Client, safe
 	// Sleep to wait for all other tidb instances update their safepoint cache.
 	time.Sleep(gcSafePointCacheInterval)
 
-	err = gcWorker.uploadSafePointToPD(ctx, safePoint)
+	err = gcWorker.uploadSafePointToPD(ctx, safePoint, nil)
 	if err != nil {
 		return errors.Trace(err)
 	}
