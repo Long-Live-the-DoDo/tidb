@@ -2023,6 +2023,7 @@ func (b *executorBuilder) buildUpdate(v *plannercore.Update) Executor {
 		tblID2table:               tblID2table,
 		tblColPosInfos:            v.TblColPosInfos,
 		assignFlag:                assignFlag,
+		rawUpdate:                 v.RawUpdate,
 	}
 	return updateExec
 }

@@ -67,6 +67,8 @@ type UpdateExec struct {
 	tableUpdatable []bool
 	changed        []bool
 	matches        []bool
+
+	rawUpdate bool
 }
 
 // prepare `handles`, `tableUpdatable`, `changed` to avoid re-computations.
@@ -188,8 +190,19 @@ func (e *UpdateExec) exec(ctx context.Context, schema *expression.Schema, row, n
 		newTableData := newData[content.Start:content.End]
 		flags := bAssignFlag[content.Start:content.End]
 
+		commitTs := uint64(0)
+		op := byte('P')
+		if e.rawUpdate {
+			for j, col := range schema.Columns {
+				if col.ID == model.ExtraMVCCTsID {
+					commitTs = row[j].GetUint64()
+				} else if col.ID == model.ExtraMVCCOpID {
+					op = row[j].GetString()[0]
+				}
+			}
+		}
 		// Update row
-		changed, err1 := updateRecord(ctx, e.ctx, handle, oldData, newTableData, flags, tbl, false, e.memTracker)
+		changed, err1 := updateRecord(ctx, e.ctx, handle, oldData, newTableData, flags, tbl, false, e.memTracker, e.rawUpdate, commitTs, op)
 		if err1 == nil {
 			e.updatedRowKeys[content.Start].Set(handle, changed)
 			continue
