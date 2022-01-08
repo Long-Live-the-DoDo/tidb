@@ -405,7 +405,7 @@ func (w *GCWorker) prepareSavePoints(safePoint time.Time) ([]uint64, error) {
 	for err == nil && req.NumRows() != 0 {
 		for row := it.Begin(); row != it.End(); row = it.Next() {
 			t, _ := row.GetTime(0).GoTime(time.Local)
-			savePoints = append(savePoints, uint64(t.Unix()<<18))
+			savePoints = append(savePoints, uint64((t.Unix()*1000)<<18))
 		}
 		err = rs.Next(context.Background(), req)
 	}
